@@ -1,7 +1,6 @@
 import asyncio
 from telethon.sync import TelegramClient, events
 from PIL import Image
-import pytesseract
 import io
 import logging
 from typing import Optional
@@ -16,6 +15,20 @@ sys.path.append(str(project_root))
 from db.newsDB import NewsSQL
 from db.manager import DatabaseManager
 from src.utils.config import api_hash, api_id, phone_number
+from src.agents.crypto_filter import CryptoClassifierTester
+
+BASE_DIR = Path(__file__).parent.parent  # Для стандартной структуры проекта
+
+
+
+# Пути к файлам относительно BASE_DIR
+PATHS = {
+    "embeddings": BASE_DIR / "data" / "other" / "navec_crypto_extended.npz",
+    "crypto_news": BASE_DIR / "data" / "news_cat" / "crypto_news.txt",
+    "economy_news": BASE_DIR / "data" / "news_cat" / "economy_news.txt",
+    "other_news": BASE_DIR / "data" / "news_cat" / "other_news.txt",
+    "model_save": BASE_DIR / "data" / "other" / "crypto_classifier.pt"
+}
 
 # Настройка логирования
 logging.basicConfig(
@@ -54,17 +67,17 @@ class TelegramNewsBot:
         return cleaned_text
     
     async def classification_news(self, news: str):
-        pass
-
-    async def extract_text_from_photo(self, photo_bytes: bytes) -> Optional[str]:
-        """Извлекает текст с изображения с помощью OCR."""
-        try:
-            image = Image.open(io.BytesIO(photo_bytes))
-            text = pytesseract.image_to_string(image, lang='rus+eng')
-            return await self._clean_data(text) if text else None
-        except Exception as e:
-            logger.error(f"OCR error: {e}")
-            return None
+        tester = CryptoClassifierTester(
+            model_path=PATHS['model_save'],
+            embeddings_path=PATHS["embeddings"],
+        )
+        result = tester.predict(news)
+        if result['class'] == "Криптовалюта":
+            return 'crypto'
+        elif result['class'] == 'Экономика':
+            return 'economy'
+        else:
+            return 'other'
     
     async def process_content(self, text: str, source: str) -> Optional[dict]:
         """Обрабатывает текст через весь пайплайн."""
@@ -72,11 +85,12 @@ class TelegramNewsBot:
             clean_text = await self._clean_data(text)
             if not clean_text:
                 return None
-                
+            
+            news_class = await self.classification_news(news=clean_text)
             news_item = {
                 'source': source,
                 'text': clean_text,  
-                'class_news': 'unclassified'  
+                'class_news': news_class 
             }
             
             with self.db_manager.get_cursor() as cursor:
@@ -97,15 +111,8 @@ class TelegramNewsBot:
             if name:
                 if name not in self.chanels_names:
                     self.chanels_names.append(name)
-
-            
             if event.text:
                 await self.process_content(event.text, 'telegram_text')
-            elif event.photo:
-                photo_bytes = await event.download_media(file=bytes)
-                extracted_text = await self.extract_text_from_photo(photo_bytes)
-                if extracted_text:
-                    await self.process_content(extracted_text, 'telegram_photo')
         
         except Exception as e:
             logger.error(f"Handler error: {e}")
@@ -123,7 +130,6 @@ class TelegramNewsBot:
 
 if __name__ == "__main__":
     try:
-        pytesseract.get_tesseract_version()
         bot = TelegramNewsBot()
         # asyncio.run(bot.clean_db())
         asyncio.run(bot.run())
